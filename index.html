@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>BASE — Умная аренда</title>
+  <meta name="description" content="BASE — калькулятор жилья для нестандартного графика: посуточно, понедельно или долгосрочно. Финансовая свобода начинается с правильного выбора.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f2f2f4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d0e10" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="BASE">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="./styles.css">
+  <script>
+    // Тема до первой отрисовки — без вспышки неправильного цвета.
+    (function () {
+      try {
+        var s = JSON.parse(localStorage.getItem('base.v1') || '{}');
+        var t = s && s.ui && s.ui.theme;
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip" href="#main">К содержимому</a>
+
+  <main id="main" class="app" tabindex="-1">
+    <section id="view-home" class="view" data-view="home" aria-label="Главная"></section>
+    <section id="view-compare" class="view" data-view="compare" aria-label="Сравнение" hidden></section>
+    <section id="view-scenarios" class="view" data-view="scenarios" aria-label="Сценарии" hidden></section>
+    <section id="view-listings" class="view" data-view="listings" aria-label="Мои варианты" hidden></section>
+    <section id="view-settings" class="view" data-view="settings" aria-label="Настройки" hidden></section>
+  </main>
+
+  <nav class="tabbar" aria-label="Разделы">
+    <a href="#home" class="tab" data-tab="home">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5"/><path d="M6.5 10v8.5a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V10"/><path d="M10 19.5v-5h4v5"/></svg>
+      <span>Главная</span>
+    </a>
+    <a href="#compare" class="tab" data-tab="compare">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19.5V11"/><path d="M12 19.5V5"/><path d="M19 19.5v-6"/><path d="M3.5 19.5h17"/></svg>
+      <span>Сравнение</span>
+    </a>
+    <a href="#scenarios" class="tab" data-tab="scenarios">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.5v6a4 4 0 0 0 4 4h8"/><path d="m15 11.5 3 3-3 3"/><circle cx="6" cy="19" r="1.6"/></svg>
+      <span>Сценарии</span>
+    </a>
+    <a href="#listings" class="tab" data-tab="listings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h10a1 1 0 0 1 1 1v14.2l-6-3.7-6 3.7V5.5a1 1 0 0 1 1-1Z"/></svg>
+      <span>Мои варианты</span>
+    </a>
+    <a href="#settings" class="tab" data-tab="settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9"/><path d="M17 7h3"/><circle cx="15" cy="7" r="2"/><path d="M4 17h3"/><path d="M11 17h9"/><circle cx="9" cy="17" r="2"/><path d="M4 12h12"/><circle cx="18" cy="12" r="2"/></svg>
+      <span>Настройки</span>
+    </a>
+  </nav>
+
+  <div id="sheet-root" class="sheet-root" hidden>
+    <div class="sheet-backdrop" data-close-sheet></div>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <header class="sheet-head">
+        <div class="grabber" aria-hidden="true"></div>
+        <h2 id="sheet-title" class="sheet-title"></h2>
+        <button type="button" class="btn-text sheet-done" data-close-sheet>Готово</button>
+      </header>
+      <div class="sheet-body" id="sheet-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <noscript>
+    <p class="noscript">BASE работает в браузере на JavaScript. Включите его, чтобы пользоваться приложением.</p>
+  </noscript>
+
+  <script src="./finance.js"></script>
+  <script src="./charts.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
