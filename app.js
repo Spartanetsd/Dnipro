@@ -47,7 +47,7 @@
   /* ───────────────────────── состояние ───────────────────────── */
   var state = load();
   var R = F.compute(state);
-  var ui = { tab: 'home', compareTab: 'options', flowId: null, flowMonth: 0, reserveK: 12, scFor: 'best', scOpen: null, adviceAll: false };
+  var ui = { tab: 'home', compareTab: 'options', flowMonth: 0, reserveK: 12, scFor: 'best', scOpen: null };
   var lastVals = {};
   var installEvent = null;
 
@@ -177,6 +177,8 @@
   function render() {
     var el = document.getElementById('view-' + ui.tab);
     if (!el) return;
+    var V = VIEWS[ui.tab];
+    if (V.canUpdate && V.canUpdate(el)) { V.update(); return; }
     var active = document.activeElement;
     var fk = active && el.contains(active) ? fkOf(active) : null;
     el.innerHTML = VIEWS[ui.tab].html();
@@ -219,197 +221,622 @@
     if (changed && !noScroll) window.scrollTo(0, 0);
   }
 
-  /* ═════════════════════════ ГЛАВНАЯ ═════════════════════════ */
+  /* ═════════════════════════ ГЛАВНАЯ ═════════════════════════
+     Один экран — один ответ. Экран собирается один раз и дальше только обновляется:
+     цифры прокручиваются, ползунки скользят, ответ меняется прямо под пальцем. */
+  var DO_TEXT = { daily: 'Снимайте посуточно', realtor: 'Снимайте через риелтора', direct: 'Снимайте напрямую', weekly: 'Снимайте понедельно', aparthotel: 'Живите в апарт-отеле' };
+  var VS_TEXT = { daily: 'посуточной арендой', realtor: 'риелтором', direct: 'арендой напрямую', weekly: 'понедельной арендой', aparthotel: 'апарт-отелем' };
+  var CITY_IN = { dnipro: 'в Днепре', kamianske: 'в Каменском' };
+  var HEX_DARK = { daily: '#3987e5', realtor: '#d95926', direct: '#199e70', weekly: '#e66767', aparthotel: '#9085e9', custom: '#d55181' };
+  var PRIORITY_NOTE = {
+    economy: 'Цена решает почти всё — 80% оценки.',
+    flex: 'Минимум предоплат и обязательств, легко передумать — 60%.',
+    comfort: 'Укрытие, отопление, кухня и стиралка важнее цены — 60%.',
+    balanced: 'Цена 45%, гибкость 25%, комфорт и безопасность 30%.'
+  };
+  var CHEV = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>';
+  var NEXT = '<svg class="next" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>';
+  var SHARE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14.5V3.5"/><path d="m7.5 7.5 4.5-4.5 4.5 4.5"/><path d="M8.5 10.5H7a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-1.5"/></svg>';
+  var DIGITS = '<i>0</i><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i><i>6</i><i>7</i><i>8</i><i>9</i>';
+  var PRICE_STEP = 50;
+  var homeShown = false;
+
+  function doText(id) { return DO_TEXT[id] || ('Выбирайте «' + oname(id) + '»'); }
+  function vsText(id) { return VS_TEXT[id] || ('«' + oname(id) + '»'); }
+  function homeIn(st) {
+    var hid = (st || R.state).cities.homeId;
+    if (CITY_IN[hid]) return CITY_IN[hid];
+    var c = (st || R.state).cities.list.filter(function (x) { return x.id === hid; })[0];
+    return c ? 'в городе «' + c.name + '»' : 'дома';
+  }
+  function dotName(id) { return '<i class="dot" style="--c:' + optColor(id) + '"></i><b>' + h(oname(id)) + '</b>'; }
+  function monthsText(m) {
+    if (m >= 24) { var yy = Math.floor(m / 12 + 1e-9); return yy + ' ' + F.plural(yy, 'год', 'года', 'лет'); }
+    if (m >= 2) { var r = Math.floor(m + 1e-9); return r + ' ' + F.monthsWord(r); }
+    return num(Math.floor(m * 10) / 10, 1) + ' месяца';
+  }
+
+  /* ── модель главной карточки (общая для экрана и картинки «Поделиться») ── */
+  function answerModel(Rx) {
+    var b = Rx.best, sv = Rx.savings, m = { bestId: b.id, title: doText(b.id) };
+    m.eyebrow = 'Лучший выбор · ' + F.PRIORITIES[Rx.state.priority].short.toLowerCase();
+    var vsId, year;
+    if (sv.same) {
+      vsId = sv.nextId; m.val = Math.max(0, sv.nextMonthly); year = vsId ? Rx.options[vsId].year - b.year : 0;
+      m.tone = m.val > 0.5 ? 'pos' : 'neutral'; m.label = 'Вы экономите';
+    } else if (sv.monthly > 0.5) {
+      vsId = sv.vs; m.tone = 'pos'; m.label = 'Вы экономите'; m.val = sv.monthly; year = sv.year;
+    } else if (sv.monthly < -0.5) {
+      vsId = sv.vs; m.tone = 'warn'; m.label = 'Вы доплачиваете'; m.val = -sv.monthly; year = -sv.year;
+    } else {
+      vsId = sv.vs; m.tone = 'neutral'; m.label = 'Разницы почти нет'; m.val = 0; year = 0;
+    }
+    m.year = year;
+    m.yearText = money(year) + ' за год';
+    m.sub = m.tone === 'warn' ? 'в месяц — за гибкость и комфорт' : m.tone === 'pos' ? 'в месяц · ' + m.yearText : 'в месяц';
+    m.equiv = m.tone === 'pos' && b.avg > 0 && year / b.avg >= 1 ? 'Это как ' + monthsText(year / b.avg) + ' жилья бесплатно' : '';
+    m.vs = vsId ? 'по сравнению с ' + vsText(vsId) : '';
+    return m;
+  }
+
+  /* ── прокручивающиеся цифры ── */
+  var odoPrev = null;
+  function odoSet(el, text, mode) {
+    if (!el) return;
+    var chars = Array.from(text);
+    var shape = chars.map(function (c) { return /\d/.test(c) ? 'd' : c; }).join('');
+    var fresh = el.getAttribute('data-shape') !== shape;
+    if (fresh) {
+      el.setAttribute('data-shape', shape);
+      el.innerHTML = chars.map(function (c) {
+        return /\d/.test(c) ? '<span class="od"><span class="od-s">' + DIGITS + '</span></span>' : '<span class="od-x">' + (c === ' ' || c === ' ' ? '&nbsp;' : h(c)) + '</span>';
+      }).join('');
+    }
+    var digits = chars.filter(function (c) { return /\d/.test(c); });
+    var strips = el.querySelectorAll('.od-s');
+    el.classList.toggle('live', mode === 'live');
+    if (mode === 'static' || reduceMotion()) {
+      strips.forEach(function (s, i) { s.style.transition = 'none'; s.style.transform = 'translateY(' + (-Number(digits[i]) * 10) + '%)'; });
+      void el.offsetWidth;
+      strips.forEach(function (s) { s.style.transition = ''; s.style.transitionDelay = '0ms'; });
+      return;
+    }
+    if (fresh && mode !== 'live') {
+      // новые разряды выкатываются от нуля, по очереди
+      strips.forEach(function (s) { s.style.transition = 'none'; s.style.transform = 'translateY(0)'; });
+      void el.offsetWidth;
+      strips.forEach(function (s, i) { s.style.transition = ''; s.style.transitionDelay = (i * 45) + 'ms'; });
+    } else {
+      strips.forEach(function (s) { s.style.transitionDelay = '0ms'; });
+    }
+    strips.forEach(function (s, i) { s.style.transform = 'translateY(' + (-Number(digits[i]) * 10) + '%)'; });
+  }
+  function fitHero(card) {
+    var box = card.querySelector('.answer-value'), odo = card.querySelector('.odo');
+    if (!box || !odo) return;
+    box.style.fontSize = '';
+    var fs = parseFloat(getComputedStyle(box).fontSize), guard = 0;
+    while (odo.scrollWidth > box.clientWidth + 1 && fs > 30 && guard++ < 40) { fs -= 2; box.style.fontSize = fs + 'px'; }
+  }
+
+  /* ── тактильный «щелчок», когда меняется ответ (Android — вибрация, iPhone — системный переключатель) ── */
+  function haptic() {
+    try {
+      if (navigator.vibrate) { navigator.vibrate(14); return; }
+      var lb = document.createElement('label');
+      lb.setAttribute('aria-hidden', 'true');
+      lb.style.display = 'none';
+      var inp = document.createElement('input');
+      inp.type = 'checkbox'; inp.setAttribute('switch', ''); inp.tabIndex = -1;
+      lb.appendChild(inp);
+      document.head.appendChild(lb);
+      lb.click();
+      document.head.removeChild(lb);
+    } catch (e) {}
+  }
+
+  /* ── зоны решения на ползунках: где какой вариант лучший ── */
+  var ZC = { duty: null, price: null };
+  function bestFor(s) { return F.compute(s, { light: true }).bestId; }
+  function keyWithout(st, kind) {
+    var c = F.clone(st);
+    if (kind === 'duty') c.schedule.dutyDays = null; else c.options.daily.price = null;
+    c.ui = c.listings = c.compareIds = c.scenarioParams = c.cities = c.baselineId = null;
+    return kind + JSON.stringify(c);
+  }
+  function segsFrom(values, best, refine) {
+    var segs = [];
+    for (var i = 0; i < values.length; i++) {
+      if (!segs.length || best[i] !== segs[segs.length - 1].id) {
+        var prev = segs[segs.length - 1];
+        var lo = i ? values[i - 1] : values[0], hi = values[i];
+        if (prev && refine) { var r = refine(lo, hi, prev.id); lo = r[0]; hi = r[1]; }
+        if (prev) { prev.last = lo; prev.to = (lo + hi) / 2; }
+        segs.push({ id: best[i], first: hi, from: prev ? (lo + hi) / 2 : values[0], to: values[values.length - 1], last: values[values.length - 1] });
+      }
+    }
+    return segs;
+  }
+  function dutyZones(st) {
+    var key = keyWithout(st, 'duty');
+    if (ZC.duty && ZC.duty.key === key) return ZC.duty;
+    var s = F.clone(st);
+    var m0 = F.buildMonths(F.normalize(s).state.schedule, 1)[0];
+    var days = m0.days, maxN = Math.max(0, days - Math.min(days, s.schedule.otherAwayDays || 0));
+    var values = [], best = [];
+    for (var n = 0; n <= maxN; n++) { s.schedule.dutyDays = maxN - n; values.push(n); best.push(bestFor(s)); }
+    ZC.duty = { key: key, days: days, maxN: maxN, min: 0, max: days, segs: segsFrom(values, best, null) };
+    return ZC.duty;
+  }
+  function priceZones(st, range) {
+    var key = keyWithout(st, 'price') + '|' + range.min + '|' + range.max;
+    if (ZC.price && ZC.price.key === key) return ZC.price;
+    var s = F.clone(st);
+    var values = [], best = [];
+    for (var v = range.min; v <= range.max; v += PRICE_STEP) { s.options.daily.price = v; values.push(v); best.push(bestFor(s)); }
+    var refine = function (lo, hi, leftId) {
+      while (hi - lo > 1) { var mid = Math.floor((lo + hi) / 2); s.options.daily.price = mid; if (bestFor(s) === leftId) lo = mid; else hi = mid; }
+      return [lo, hi];
+    };
+    ZC.price = { key: key, min: range.min, max: range.max, segs: segsFrom(values, best, refine) };
+    return ZC.price;
+  }
+  function priceRange(p) { return { min: 100, max: Math.max(2000, Math.ceil((p || 0) * 1.5 / 500) * 500) }; }
+  function zonesHtml(z, fmtLabel) {
+    var span = (z.max - z.min) || 1, out = '', lastLabel = -1;
+    z.segs.forEach(function (sg, i) {
+      var f1 = (sg.from - z.min) / span, f2 = (sg.to - z.min) / span;
+      out += '<i style="left:' + (f1 * 100) + '%;width:' + Math.max(0, (f2 - f1) * 100) + '%;background:' + optColor(sg.id) + '"></i>';
+      if (i < z.segs.length - 1) {
+        var fb = (sg.to - z.min) / span;
+        if (lastLabel < 0 || fb - lastLabel > 0.18) {
+          out += '<b style="left:' + (fb * 100) + '%" class="' + (fb < 0.12 ? 'l' : fb > 0.88 ? 'r' : '') + '">' + h(fmtLabel(sg.last)) + '</b>';
+          lastLabel = fb;
+        }
+      }
+    });
+    return out;
+  }
+  function segAt(z, v) {
+    for (var i = 0; i < z.segs.length; i++) if (v <= z.segs[i].to + 1e-9) return i;
+    return z.segs.length - 1;
+  }
+  function dutyCaption(z, n) {
+    var i = segAt(z, n), sg = z.segs[i], prev = z.segs[i - 1], next = z.segs[i + 1];
+    if (!prev && !next) return dotName(sg.id) + ' — лучший выбор при любом числе ночей дома';
+    var dR = next ? sg.last - n : Infinity, dL = prev ? n - sg.first : Infinity;
+    if (dR <= dL) return dotName(sg.id) + ' — лучший выбор, пока дома не больше ' + sg.last + ' ' + F.nightsWord(sg.last) + '. Дальше — ' + dotName(next.id);
+    return dotName(sg.id) + ' — лучший выбор, если дома от ' + sg.first + ' ' + F.nightsWord(sg.first) + '. Меньше — ' + dotName(prev.id);
+  }
+  function priceCaption(z, p, nightlyId) {
+    var i = segAt(z, p), sg = z.segs[i], prev = z.segs[i - 1], next = z.segs[i + 1];
+    if (!prev && !next) return dotName(sg.id) + ' — лучший выбор при любой цене ночи';
+    var dR = next ? sg.last - p : Infinity, dL = prev ? p - sg.first : Infinity;
+    if (next && (dR <= dL || sg.id === nightlyId)) {
+      return dotName(sg.id) + ' — лучший выбор, пока ночь не дороже ' + money(sg.last) + '.' +
+        (sg.id === nightlyId ? ' Запас ' + money(Math.max(0, sg.last - p)) + '.' : ' Дороже — ' + dotName(next.id));
+    }
+    return dotName(sg.id) + ' — лучший выбор, если ночь дороже ' + money(prev.last) + '. Дешевле — ' + dotName(prev.id);
+  }
+
+  /* ── разметка (собирается один раз) ── */
   function brandHead() {
-    return '<header class="brand-head"><div class="brand"><span class="brand-mark" aria-hidden="true">' + I.mark + '</span><div><div class="brand-name">BASE</div><p class="brand-tag">Живи свободно. Плати разумно.</p></div></div>' +
-      '<button type="button" class="head-chip" data-act="schedule" aria-label="График проживания">' + num(R.state.schedule.dutyDays) + '&nbsp;дн. · ' + num(R.schedule.avgNights, 1) + '&nbsp;ноч.</button></header>';
+    return '<header class="brand-head"><div class="brand"><span class="brand-mark" aria-hidden="true">' + I.mark + '</span>' +
+      '<div><div class="brand-name">BASE</div><p class="brand-tag">Живи свободно. Плати разумно.</p></div></div>' +
+      (R.best ? '<button type="button" class="icon-btn" data-act="share" aria-label="Поделиться решением">' + SHARE + '</button>' : '') + '</header>';
   }
   function emptyEnabled() {
     return '<div class="card empty"><h3>Нет вариантов для сравнения</h3><p>Включите хотя бы один вариант жилья — и BASE посчитает, какой выгоднее.</p><a class="btn btn-primary" href="#compare">Открыть варианты</a></div>';
   }
-  function baselineSelect() {
-    return '<select class="inline-select" data-bind="baselineId" data-kind="str" aria-label="С чем сравнивать">' + OPT.map(function (id) {
-      return '<option value="' + id + '"' + (R.state.baselineId === id ? ' selected' : '') + '>' + h(R.options[id].short) + (R.state.options[id].enabled ? '' : ' (выкл.)') + '</option>';
-    }).join('') + '</select>';
+  var GIFT = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="8" width="17" height="4.5" rx="1"/><path d="M5 12.5v7a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-7"/><path d="M12 8v12.5"/><path d="M12 8c-1.7-3.6-5.5-3.8-5.5-1.4C6.5 8 9 8 12 8Zm0 0c1.7-3.6 5.5-3.8 5.5-1.4C17.5 8 15 8 12 8Z"/></svg>';
+  function answerShell() {
+    return '<section class="card answer">' +
+      '<button type="button" class="eyebrow-btn" data-act="priority"><span data-live="eyebrow"></span>' + CHEV + '</button>' +
+      '<h1 class="answer-title"><i class="dot lg" data-live="dot"></i><span class="t" data-live="title"></span></h1>' +
+      '<div class="answer-label" data-live="label"></div>' +
+      '<div class="answer-value"><span class="odo" aria-hidden="true"></span><span class="sr-only" data-live="valueSr"></span></div>' +
+      '<div class="answer-sub" data-live="sub"></div>' +
+      '<div class="gift" data-live="equivBox">' + GIFT + '<span data-live="equiv"></span></div>' +
+      '<button type="button" class="vs-btn" data-act="baseline"><span data-live="vs"></span>' + CHEV + '</button>' +
+      '<span class="sr-only" aria-live="polite" data-live="announce"></span></section>';
   }
-
-  function heroHtml() {
-    var b = R.best, sv = R.savings, cls, label, val, sub;
-    if (sv.same) {
-      cls = sv.nextMonthly > 0.5 ? 'is-pos' : 'is-neutral';
-      label = 'Вы уже на лучшем варианте — он дешевле';
-      val = Math.max(0, sv.nextMonthly);
-      sub = 'в месяц, чем «' + h(sv.nextId ? oname(sv.nextId) : '—') + '» · база: ' + baselineSelect();
-    } else if (sv.monthly > 0.5) {
-      cls = 'is-pos'; label = 'Вы экономите'; val = sv.monthly;
-      sub = 'в месяц по сравнению с ' + baselineSelect();
-    } else if (sv.monthly < -0.5) {
-      cls = 'is-warn'; label = 'Вы доплачиваете'; val = -sv.monthly;
-      sub = 'в месяц по сравнению с ' + baselineSelect() + ' — за гибкость и комфорт';
-    } else {
-      cls = 'is-neutral'; label = 'Разницы почти нет'; val = 0;
-      sub = 'по сравнению с ' + baselineSelect();
-    }
-    return '<section class="card hero ' + cls + '" aria-live="polite">' +
-      '<div class="hero-top"><span class="eyebrow">Лучшая стратегия</span>' +
-      '<button type="button" class="best-chip" data-act="editOption" data-id="' + b.id + '"><i class="dot" style="--c:' + optColor(b.id) + '"></i>' + h(b.short) + '</button></div>' +
-      '<div class="hero-label">' + label + '</div>' +
-      '<div class="hero-value" data-anim="hero" data-value="' + val + '">' + money(val) + '</div>' +
-      '<div class="hero-sub">' + sub + '</div>' +
-      '<div class="hero-note">в среднем за ' + R.H + ' ' + F.monthsWord(R.H) + ' · приоритет «' + h(F.PRIORITIES[R.state.priority].short) + '»</div></section>';
+  function fitTitle(card) {
+    var t = card.querySelector('.answer-title'), sp = t && t.querySelector('.t');
+    if (!sp) return;
+    t.style.fontSize = ''; t.classList.add('one');
+    var fs = parseFloat(getComputedStyle(t).fontSize), g = 0;
+    while (sp.scrollWidth > sp.clientWidth + 1 && fs > 19 && g++ < 12) { fs -= 1; t.style.fontSize = fs + 'px'; }
+    if (sp.scrollWidth > sp.clientWidth + 1) t.classList.remove('one');
   }
-
-  function metricsHtml() {
-    var b = R.best, sv = R.savings;
-    var yearCls = sv.year > 0.5 && !sv.same ? 'good' : sv.year < -0.5 ? 'warn' : '';
-    var yearVal = sv.same ? (sv.nextId ? R.options[sv.nextId].year - b.year : 0) : sv.year;
-    var yearFoot = sv.same ? (sv.nextId ? 'против «' + oname(sv.nextId) + '»' : '') : 'против «' + R.baseline.short + '»';
-    if (sv.same && yearVal > 0.5) yearCls = 'good';
-    var unusedFoot = b.idleTotal > 0 ? 'переплата ' + money(b.idleTotal) + ' за ' + R.H + ' мес.' : 'платите только за свои ночи';
-    var moveFoot = b.refundable > 0 ? 'из них ' + money(b.refundable) + ' залог — вернётся' : (b.type === 'monthly' ? 'без залога' : 'первая бронь, без залога');
-    return '<div class="metrics">' +
-      '<div class="metric"><span class="metric-label">Стоимость месяца</span><span class="metric-value num">' + money(b.avg) + '</span><span class="metric-foot">«' + h(b.short) + '», в среднем</span></div>' +
-      '<div class="metric"><span class="metric-label">Экономия за 12 мес.</span><span class="metric-value num ' + yearCls + '">' + money(yearVal) + '</span><span class="metric-foot">' + h(yearFoot) + '</span></div>' +
-      '<div class="metric"><span class="metric-label">Нужно для заселения</span><span class="metric-value num">' + money(b.moveIn) + '</span><span class="metric-foot">' + h(moveFoot) + '</span></div>' +
-      '<div class="metric"><span class="metric-label">Оплачено, но пустует</span><span class="metric-value num">' + num(b.unusedPerMonth, 1) + ' <small>' + F.daysWord(b.unusedPerMonth) + '/мес</small></span><span class="metric-foot">' + h(unusedFoot) + '</span></div>' +
-      '<button type="button" class="metric" data-act="flex" data-id="' + b.id + '"><span class="metric-label">Финансовая гибкость</span><span class="metric-value num">' + num(b.flex.score) + '<small>/100</small></span>' + meter(b.flex.score) + '</button>' +
-      '<button type="button" class="metric" data-act="editOption" data-id="' + b.id + '" data-section="comfort"><span class="metric-label">Комфорт и безопасность</span><span class="metric-value num">' + num(b.comfort.score) + '<small>/100</small></span>' + meter(b.comfort.score) + '</button>' +
-      '</div>';
+  function sliderHtml(kind, label) {
+    return '<div class="slider" data-slider="' + kind + '" role="slider" tabindex="0" aria-label="' + h(label) + '">' +
+      '<span class="s-track"><i class="s-fill"></i><i class="s-other"></i></span><span class="s-zones"></span><span class="s-thumb"></span></div>';
   }
-
-  function quickHtml() {
-    var S = R.state.schedule;
-    var noOv = Object.keys(S.dutyOverrides).length === 0;
-    var m0 = R.monthsH[0];
-    var dutyChips = '<div class="chips">' + [7, 10, 14].map(function (d) {
-      return '<button type="button" class="chip" data-set="schedule.dutyDays" data-type="num" data-value="' + d + '" aria-pressed="' + (S.dutyDays === d) + '">' + d + ' ' + F.daysWord(d) + '</button>';
-    }).join('') + (noOv ? '' : '<span class="badge warn">есть дни по месяцам</span>') + '</div>';
-    var horizonChips = '<div class="chips">' + [1, 3, 6, 12].map(function (m) {
-      return '<button type="button" class="chip" data-set="schedule.horizon" data-type="num" data-value="' + m + '" aria-pressed="' + (S.horizon === m) + '">' + m + ' мес.</button>';
-    }).join('') + '<button type="button" class="chip" data-act="schedule" data-id="horizon" aria-pressed="' + ([1, 3, 6, 12].indexOf(S.horizon) < 0) + '">' + ([1, 3, 6, 12].indexOf(S.horizon) < 0 ? S.horizon + ' мес.' : 'Другой') + '</button></div>';
-    var where = { dnipro: 'в Днепре', kamianske: 'в Каменском' }[R.state.cities.homeId] || 'дома';
-    var nightsHint = S.monthMode === 'calendar' ? where + ' · ' + m0.labelLong.toLowerCase() + ', дальше по календарю' : where + ' · из 30 дней месяца';
+  function monthShell() {
     var d = R.state.options.daily;
-    return '<section class="card section" aria-labelledby="quick-t">' +
-      '<div class="row-between"><h2 class="card-title" id="quick-t">Ваш месяц</h2><button type="button" class="link-btn" data-act="schedule">Подробный график</button></div>' +
-      frow('Дней в Краматорске', stepper('schedule.dutyDays', 1, 0, 62, 'num', 'Дней в Краматорске'), 'дежурство') +
-      '<div class="control-sub">' + dutyChips + '</div>' +
-      frow('Ночей дома', '<span class="stepper" role="group" aria-label="Ночей дома"><button type="button" data-act="nights" data-delta="-1" aria-label="Ночей дома: меньше">' + I.minus + '</button><output class="num">' + num(m0.nights) + '</output><button type="button" data-act="nights" data-delta="1" aria-label="Ночей дома: больше">' + I.plus + '</button></span>', nightsHint) +
-      (d.enabled ? frow('Цена за ночь', stepper('options.daily.price', 50, 0, 100000, 'money', 'Цена за ночь'), 'посуточная аренда') : '') +
-      frow('Горизонт', '', 'для средних значений и итогов') +
-      '<div class="control-sub">' + horizonChips + '</div></section>';
-  }
-
-  function priorityHtml() {
-    var max = Math.max.apply(null, R.ranking.map(function (id) { return R.options[id].score.total; }).concat([1]));
-    var list = R.ranking.map(function (id, i) {
-      var r = R.options[id];
-      return '<li><button type="button" class="rank-btn" data-act="editOption" data-id="' + id + '" style="--c:' + optColor(id) + '">' +
-        '<i class="dot lg"></i><span class="rank-name"><span>' + h(r.short) + '</span>' + (i === 0 ? badge('лучший', 'good') : '') + '</span>' +
-        '<span class="rank-val">' + money(r.avg) + '<span class="muted small">/мес</span></span>' +
-        '<span class="rank-meta"><span class="rank-bar"><i style="width:' + (r.score.total / max * 100) + '%"></i></span><span>' + num(r.score.total) + ' баллов</span></span></button></li>';
+    var presets = [7, 10, 14].map(function (x) {
+      return '<button type="button" class="chip" data-set="schedule.dutyDays" data-type="num" data-value="' + x + '">' + x + ' дн.</button>';
     }).join('');
-    return '<section class="section"><div class="section-head"><h2 class="section-title">Что для вас важнее</h2><button type="button" class="link-btn" data-act="scoring">Как считается</button></div>' +
-      seg('priority', F.PRIORITY_IDS.map(function (p) { return [p, F.PRIORITIES[p].short]; }), 'seg-lg') +
-      '<div class="card" style="margin-top:12px"><ul class="rank">' + list + '</ul></div></section>';
+    return '<section class="section"><div class="section-head"><h2 class="section-title">Ваш месяц</h2>' +
+      '<button type="button" class="link-btn" data-act="schedule" data-live="monthLink">Подробнее</button></div>' +
+      '<div class="card month">' +
+      '<div class="month-legend"><span><b class="num" data-live="nights"></b> <span data-live="nightsWord"></span></span>' +
+      '<span class="muted"><b class="num" data-live="duty"></b> <span data-live="dutyWord"></span></span></div>' +
+      sliderHtml('duty', 'Ночей дома в месяце') +
+      '<p class="zone-cap" data-live="dutyCap"></p>' +
+      '<div class="month-ctrl"><span class="muted small">Дежурство</span><div class="chips" role="group" aria-label="Дней в Краматорске">' + presets + '</div></div>' +
+      '<p class="month-note" data-live="ovNote" hidden>В отдельных месяцах дни заданы вручную — <button type="button" class="link-btn" data-act="schedule">посмотреть</button></p>' +
+      (d.enabled ? '<div class="price-block"><div class="price-head"><span class="control-label">Цена ночи</span>' +
+        '<button type="button" class="price-val num" data-act="editOption" data-id="daily" data-live="price" aria-label="Точная цена ночи"></button></div>' +
+        sliderHtml('price', 'Цена ночи посуточно') + '<p class="zone-cap" data-live="priceCap"></p></div>' : '') +
+      '</div></section>';
+  }
+  function ladderShell() {
+    return '<section class="section"><div class="section-head"><h2 class="section-title">Сколько стоит месяц</h2><a class="link-btn" href="#compare">Все графики</a></div>' +
+      '<div class="card"><ul class="ladder"></ul><p class="ladder-note"><span data-live="hatchNote"><i class="hatch-key"></i>плата за дни, когда вас нет дома · </span>' +
+      'в среднем за <span data-live="horizon"></span>, с комиссиями. Залог не расход — он вернётся.</p></div></section>';
+  }
+  function ladRowHtml(id) {
+    return '<li data-id="' + id + '"><button type="button" class="lad" data-act="viewOption" data-id="' + id + '" style="--c:' + optColor(id) + '">' +
+      '<span class="lad-name"><i class="dot"></i><span>' + h(oname(id)) + '</span></span><span class="lad-val num" data-l="val"></span>' +
+      '<span class="lad-bar"><i class="lb-use"></i><i class="lb-idle"></i></span><span class="lad-tag" data-l="tag"></span>' + NEXT + '</button></li>';
   }
 
+  var INSIGHT_ORDER = ['capped', 'upfront', 'stays', 'weeklyUnused', 'noComm', 'duty14', 'duty7', 'price100', 'opp', 'idle', 'priceBE'];
+  function pickInsight() {
+    var A = (R.advice || []).filter(function (a) { return a.id !== 'summary' && a.id !== 'reserve'; });
+    for (var i = 0; i < INSIGHT_ORDER.length; i++) {
+      var f = A.filter(function (a) { return a.id === INSIGHT_ORDER[i]; })[0];
+      if (f) return f;
+    }
+    return A[0] || null;
+  }
+  var ICON_TONE = { positive: I.down, warning: I.alert, neutral: I.info };
+  function adviceItem(a) {
+    return '<li class="' + a.tone + '"><span class="advice-ico" aria-hidden="true">' + (ICON_TONE[a.tone] || I.info) + '</span><div><div class="advice-title">' + h(a.title) + '</div>' +
+      '<div class="advice-text">' + h(a.text) + '</div><details><summary>Как посчитано</summary><div class="calc">' + h(a.calc) + '</div></details></div></li>';
+  }
+  function insightHtml() {
+    var a = pickInsight();
+    if (!a) return '';
+    var n = (R.advice || []).length;
+    return '<section class="section"><div class="section-head"><h2 class="section-title">Главное</h2>' +
+      (n > 1 ? '<button type="button" class="link-btn" data-act="advice">Все советы · ' + n + '</button>' : '') + '</div>' +
+      '<div class="card"><ul class="advice">' + adviceItem(a) + '</ul></div></section>';
+  }
+  function reserveMiniHtml() {
+    var rs = R.reserve;
+    if (!rs || rs.monthly <= 0.5 || rs.goal <= 0) return '';
+    var prog = Math.max(0, Math.min(1, rs.points[3].saved / rs.goal));
+    var C = 2 * Math.PI * 26;
+    var text = rs.reachMonth
+      ? 'Откладывайте <b>' + money(rs.monthly) + '</b> в месяц — резерв на ' + rs.goalMonths + ' ' + F.monthsWord(rs.goalMonths) + ' жилья соберётся за <b>' + rs.reachMonth + ' ' + F.monthsWord(rs.reachMonth) + '</b>.'
+      : 'Откладывайте <b>' + money(rs.monthly) + '</b> в месяц — так экономия станет подушкой.';
+    return '<section class="section"><button type="button" class="card reserve-mini" data-act="reserve">' +
+      '<span class="ring sm" aria-hidden="true"><svg viewBox="0 0 64 64"><circle class="ring-track" cx="32" cy="32" r="26"/><circle class="ring-fill" cx="32" cy="32" r="26" stroke-dasharray="' + C + '" stroke-dashoffset="' + (C * (1 - prog)) + '"/></svg>' +
+      '<span class="ring-center"><b>' + (rs.reachMonth || '—') + '</b>мес.</span></span>' +
+      '<span class="reserve-mini-body"><span class="reserve-mini-title">Калькулятор свободы</span><span class="reserve-mini-text">' + text + '</span></span>' + NEXT + '</button></section>';
+  }
   function warningsHtml() {
     var seen = {}, list = [];
     R.warnings.forEach(function (w) { if (!seen[w.message]) { seen[w.message] = 1; list.push(w); } });
     if (!list.length) return '';
     return '<div class="notice" role="status">' + I.alert + '<div><b>Проверьте данные · ' + list.length + '</b><ul>' +
-      list.slice(0, 5).map(function (w) { return '<li>' + h(w.message) + '</li>'; }).join('') + (list.length > 5 ? '<li>…и ещё ' + (list.length - 5) + '</li>' : '') + '</ul></div></div>';
+      list.slice(0, 4).map(function (w) { return '<li>' + h(w.message) + '</li>'; }).join('') + (list.length > 4 ? '<li>…и ещё ' + (list.length - 4) + '</li>' : '') + '</ul></div></div>';
   }
 
-  function adviceHtml() {
-    var A = R.advice || [];
-    if (!A.length) return '';
-    var shown = ui.adviceAll ? A : A.slice(0, 4);
-    var icon = { positive: I.down, warning: I.alert, neutral: I.info };
-    return '<section class="section"><div class="section-head"><h2 class="section-title">Советник</h2><p class="section-note">считает по вашим цифрам</p></div>' +
-      '<div class="card"><ul class="advice">' + shown.map(function (a) {
-        return '<li class="' + a.tone + '"><span class="advice-ico" aria-hidden="true">' + (icon[a.tone] || I.info) + '</span><div><div class="advice-title">' + h(a.title) + '</div>' +
-          '<div class="advice-text">' + h(a.text) + '</div><details><summary>Расчёт</summary><div class="calc">' + h(a.calc) + '</div></details></div></li>';
-      }).join('') + '</ul>' + (A.length > 4 ? '<button type="button" class="btn btn-ghost btn-block" style="margin-top:8px" data-act="adviceAll">' + (ui.adviceAll ? 'Свернуть' : 'Все советы · ' + A.length) + '</button>' : '') +
-      '</div></section>';
-  }
+  function homeShape(Rx) { return [Rx.best ? 1 : 0, Rx.state.options.daily.enabled ? 1 : 0].join('|'); }
 
-  function flowId() { return ui.flowId && R.state.options[ui.flowId] && R.state.options[ui.flowId].enabled ? ui.flowId : R.bestId; }
-  function flowHtml() {
-    var id = flowId(), r = R.options[id];
-    if (ui.flowMonth >= R.H) ui.flowMonth = 0;
-    var m = ui.flowMonth, row = r.rows[m], ml = R.months[m];
-    var ico = { pay: I.out, prepay: I.clock, freeze: I.lock, refund: I.back, info: I.check };
-    var events = row.events.length ? row.events.map(function (e) {
-      var amt = e.kind === 'refund' ? '+' + money(e.amount) : e.kind === 'info' ? '—' : money(e.amount);
-      return '<li class="' + e.kind + '"><span class="flow-ico" aria-hidden="true">' + (ico[e.kind] || I.out) + '</span><span>' + h(e.label) + '</span><span class="amt">' + amt + '</span>' +
-        (e.note || e.kind === 'freeze' ? '<span class="note">' + h(e.note || 'временно заморожено') + '</span>' : '') + '</li>';
-    }).join('') : '<li class="info"><span class="flow-ico">' + I.check + '</span><span>Платежей нет — вы весь месяц на дежурстве</span><span class="amt">0&nbsp;₴</span></li>';
-    return '<section class="section"><div class="section-head"><h2 class="section-title">Денежный поток</h2><p class="section-note">когда и сколько платить</p></div>' +
-      '<div class="card"><div class="chips">' + enabledOpts().map(function (oid) {
-        return '<button type="button" class="chip" data-act="flowOpt" data-id="' + oid + '" aria-pressed="' + (oid === id) + '"><i class="dot" style="--c:' + optColor(oid) + '"></i>' + h(oname(oid)) + '</button>';
-      }).join('') + '</div>' +
-      '<div data-chart="flow" style="margin-top:12px"></div>' +
-      '<div class="flow-detail"><div class="row-between"><b>' + h(ml.labelLong) + '</b><span class="muted small">' + ml.nights + ' ' + F.nightsWord(ml.nights) + ' дома · ' + ml.away + ' ' + F.daysWord(ml.away) + ' вне</span></div>' +
-      '<ul class="flow-list">' + events + '</ul></div>' +
-      '<div class="flow-sum">' + kpi('Заплатите', money(r.cashOutTotal)) + kpi('Вернётся', money(r.cashInTotal)) + kpi('Расход', money(r.total)) + '</div>' +
-      '<p class="group-note">За ' + R.H + ' ' + F.monthsWord(R.H) + '. Залог и предоплата — это деньги, которые уходят сейчас, но не все они расход.</p></div></section>';
-  }
+  /* ── обновление на месте ── */
+  var lastZoneT = 0;
+  function setText(root, key, text) { var e = root.querySelector('[data-live="' + key + '"]'); if (e && e.textContent !== text) e.textContent = text; return e; }
+  function setHtml(root, key, html) { var e = root.querySelector('[data-live="' + key + '"]'); if (e && e.innerHTML !== html) e.innerHTML = html; return e; }
 
-  function reserveHtml() {
-    var rs = R.reserve;
-    if (!rs) return '';
-    var head = '<section class="section"><div class="section-head"><h2 class="section-title">Калькулятор свободы</h2><p class="section-note">экономия → резерв</p></div><div class="card">';
-    if (rs.monthly <= 0.5 && rs.points[3].saved <= 0.5) {
-      return head + '<p class="card-sub">Относительно варианта «' + h(R.baseline.short) + '» экономии нет. Выберите другую базу сравнения в карточке вверху — например, самый дорогой вариант, который вы рассматривали.</p></div></section>';
+  function updateAnswer(root, Rx, mode) {
+    var card = root.querySelector('.answer');
+    if (!card) return;
+    var m = answerModel(Rx);
+    card.classList.toggle('is-pos', m.tone === 'pos');
+    card.classList.toggle('is-warn', m.tone === 'warn');
+    card.classList.toggle('is-neutral', m.tone === 'neutral');
+    setText(card, 'eyebrow', m.eyebrow);
+    setText(card, 'label', m.label);
+    setText(card, 'sub', m.sub);
+    setText(card, 'valueSr', money(m.val) + ' ' + m.sub);
+    setText(card, 'equiv', m.equiv);
+    var eb = card.querySelector('[data-live="equivBox"]'); if (eb) eb.hidden = !m.equiv;
+    var vs = setText(card, 'vs', m.vs); if (vs) vs.parentNode.hidden = !m.vs;
+    if (mode !== 'live' && mode !== 'mount') setText(card, 'announce', m.title + '. ' + m.label + ' ' + money(m.val) + ' ' + m.sub + '.');
+    var title = card.querySelector('[data-live="title"]'), dot = card.querySelector('[data-live="dot"]');
+    var prevBest = card.getAttribute('data-best');
+    if (prevBest !== m.bestId) {
+      card.setAttribute('data-best', m.bestId);
+      title.textContent = m.title;
+      dot.style.setProperty('--c', optColor(m.bestId));
+      fitTitle(card);
+      if (prevBest) haptic();
+      if (prevBest && !reduceMotion()) {
+        title.classList.remove('flip-in'); dot.classList.remove('flip-in'); card.classList.remove('pulse');
+        void card.offsetWidth;
+        title.classList.add('flip-in'); dot.classList.add('flip-in'); card.classList.add('pulse');
+      }
     }
-    var idx = [1, 3, 6, 12].indexOf(ui.reserveK); if (idx < 0) idx = 3;
-    var p = rs.points[idx];
-    var prog = rs.goal > 0 ? Math.max(0, Math.min(1, p.saved / rs.goal)) : 0;
-    var C = 2 * Math.PI * 46;
-    return head +
-      '<div class="seg" role="group">' + [1, 3, 6, 12].map(function (k) {
-        return '<button type="button" data-act="reserveK" data-k="' + k + '" aria-pressed="' + (k === ui.reserveK) + '">' + k + ' мес.</button>';
-      }).join('') + '</div>' +
-      '<div class="reserve-top"><div><div class="muted small">Сохраните за ' + p.months + ' ' + F.monthsWord(p.months) + '</div>' +
-      '<div class="reserve-big good num" data-anim="reserve" data-value="' + p.saved + '">' + money(p.saved) + '</div>' +
-      '<div class="muted small" style="margin-top:6px">против «' + h(R.baseline.short) + '»</div></div>' +
-      '<div class="ring" role="img" aria-label="Прогресс к цели резерва: ' + Math.round(prog * 100) + '%"><svg viewBox="0 0 104 104"><circle class="ring-track" cx="52" cy="52" r="46"/><circle class="ring-fill" cx="52" cy="52" r="46" stroke-dasharray="' + C + '" stroke-dashoffset="' + (C * (1 - prog)) + '"/></svg>' +
-      '<div class="ring-center"><div><b>' + Math.round(prog * 100) + '%</b>цели</div></div></div></div>' +
-      '<div class="kpis">' + kpi('От расходов на жильё', num(p.pct, 1) + '%') + kpi('Это месяцев жизни', num(p.monthsOfLiving, 1)) +
-      kpi('С доходностью ' + num(rs.rate, 1) + '%', money(p.withYield)) + '</div>' +
-      '<p class="group-note">Цель — резерв на ' + rs.goalMonths + ' ' + F.monthsWord(rs.goalMonths) + ' жилья: ' + money(rs.goal) + '. ' +
-      (rs.reachMonth ? 'Наберёте за ' + rs.reachMonth + ' ' + F.monthsWord(rs.reachMonth) + '.' : 'При текущей разнице цель не достигается за 5 лет.') +
-      ' Доходность — ваша ставка, а не обещание: проценты начисляются на отложенную экономию ежемесячно.</p>' +
-      '<ol class="steps"><li>В день оплаты жилья переводите <b>' + money(Math.max(0, rs.monthly)) + '</b> — разницу с «' + h(R.baseline.short) + '» — на отдельный накопительный счёт.</li>' +
-      '<li>Не трогайте эти деньги, пока не наберёте ' + money(rs.goal) + ': это запас на случай смены графика, переезда или ремонта машины.</li>' +
-      '<li>Сверх цели — решайте сами: вклад, досрочные платежи или крупная покупка без долгов.</li></ol>' +
-      frow('Ставка вклада', stepper('finance.rate', 0.5, 0, 100, 'pct', 'Ставка вклада'), 'годовых, ваша оценка') +
-      frow('Цель резерва', stepper('finance.reserveGoalMonths', 1, 0, 36, 'months', 'Цель резерва'), 'месяцев жилья') +
-      '</div></section>';
+    var odo = card.querySelector('.odo');
+    var before = odo.getAttribute('data-shape');
+    var text = money(m.val), om = mode;
+    if (mode === 'mount' && odoPrev !== null) {
+      // возвращение на главную: без «прокрута с нуля», только от прошлого значения
+      if (odoPrev === text) om = 'static';
+      else { odoSet(odo, odoPrev, 'static'); fitHero(card); before = odo.getAttribute('data-shape'); om = 'settle'; }
+    }
+    odoSet(odo, text, om);
+    odoPrev = text;
+    if (before !== odo.getAttribute('data-shape')) fitHero(card);
+  }
+
+  function paintSlider(sl, frac, otherFrac) {
+    sl.style.setProperty('--p', Math.max(0, Math.min(1, frac)));
+    if (otherFrac !== undefined) sl.style.setProperty('--o', Math.max(0, Math.min(1, otherFrac)));
+  }
+
+  function updateMonth(root, Rx, mode, dragging) {
+    var S = Rx.state.schedule, m0 = Rx.monthsH[0];
+    var days = m0.days, other = Math.min(days, S.otherAwayDays), maxN = days - other, n = m0.nights;
+    setText(root, 'nights', String(n));
+    setText(root, 'nightsWord', F.nightsWord(n) + ' ' + homeIn(Rx.state));
+    setText(root, 'duty', String(maxN - n));
+    setText(root, 'dutyWord', F.daysWord(maxN - n) + ' в Краматорске');
+    setText(root, 'monthLink', S.monthMode === 'calendar' ? m0.labelLong : 'Подробнее');
+    var noOv = Object.keys(S.dutyOverrides).length === 0;
+    root.querySelectorAll('.month-ctrl .chip').forEach(function (c) { c.setAttribute('aria-pressed', String(noOv && S.dutyDays === +c.getAttribute('data-value'))); });
+    var ov = root.querySelector('[data-live="ovNote"]'); if (ov) ov.hidden = noOv;
+
+    root.querySelectorAll('[data-slider]').forEach(function (sl) { sl.style.setProperty('--tc', optColor(Rx.bestId)); });
+    var ds = root.querySelector('[data-slider="duty"]');
+    var zonesDue = mode !== 'live' || Date.now() - lastZoneT > 140;
+    if (ds) {
+      ds.setAttribute('data-days', days); ds.setAttribute('data-maxn', maxN);
+      ds.setAttribute('aria-valuemin', 0); ds.setAttribute('aria-valuemax', maxN); ds.setAttribute('aria-valuenow', n);
+      ds.setAttribute('aria-valuetext', n + ' ' + F.nightsWord(n) + ' дома, ' + (maxN - n) + ' ' + F.daysWord(maxN - n) + ' в Краматорске');
+      if (dragging !== 'duty') paintSlider(ds, n / days, other / days);
+      if (dragging !== 'duty' && (zonesDue || !ZC.duty)) {
+        var dz = dutyZones(Rx.state);
+        ds.querySelector('.s-zones').innerHTML = zonesHtml(dz, function (v) { return v + ' ноч.'; });
+      }
+      if (ZC.duty) setHtml(root, 'dutyCap', dutyCaption(ZC.duty, n));
+    }
+    var ps = root.querySelector('[data-slider="price"]');
+    if (ps && Rx.state.options.daily.enabled) {
+      var p = Rx.state.options.daily.price;
+      setText(root, 'price', money(p));
+      var range = dragging === 'price' ? { min: +ps.getAttribute('data-min'), max: +ps.getAttribute('data-max') } : priceRange(p);
+      ps.setAttribute('data-min', range.min); ps.setAttribute('data-max', range.max);
+      ps.setAttribute('aria-valuemin', range.min); ps.setAttribute('aria-valuemax', range.max); ps.setAttribute('aria-valuenow', p);
+      ps.setAttribute('aria-valuetext', money(p) + ' за ночь');
+      if (dragging !== 'price') paintSlider(ps, (p - range.min) / (range.max - range.min));
+      if (dragging !== 'price' && (zonesDue || !ZC.price)) {
+        var pz = priceZones(Rx.state, range);
+        ps.querySelector('.s-zones').innerHTML = zonesHtml(pz, function (v) { return money(v); });
+      }
+      if (ZC.price) setHtml(root, 'priceCap', priceCaption(ZC.price, p, 'daily'));
+    }
+    if (zonesDue && mode === 'live') lastZoneT = Date.now();
+  }
+
+  function updateLadder(root, Rx, mode) {
+    var ul = root.querySelector('.ladder');
+    if (!ul) return;
+    var ids = Rx.byCost;
+    var max = Math.max.apply(null, ids.map(function (id) { return Rx.options[id].avg; }).concat([1]));
+    var min = ids.length ? Rx.options[ids[0]].avg : 0;
+    var anyIdle = false;
+    ids.forEach(function (id, i) {
+      var li = ul.querySelector('li[data-id="' + id + '"]');
+      if (!li) { ul.insertAdjacentHTML('beforeend', ladRowHtml(id)); li = ul.lastElementChild; }
+      var r = Rx.options[id];
+      var idle = Math.min(r.avg, r.idleTotal / Rx.H);
+      if (idle > 0.5) anyIdle = true;
+      li.querySelector('[data-l="val"]').textContent = money(r.avg);
+      li.querySelector('.lb-use').style.width = Math.max(1.5, (r.avg - idle) / max * 100) + '%';
+      li.querySelector('.lb-idle').style.width = (idle / max * 100) + '%';
+      var tag = id === Rx.bestId ? '<span class="badge good">выбор</span>' : (i === 0 ? '<span class="badge">дешевле всех</span>' : '<span class="lad-delta">+' + money(r.avg - min) + '</span>');
+      var tg = li.querySelector('[data-l="tag"]'); if (tg.innerHTML !== tag) tg.innerHTML = tag;
+    });
+    ul.querySelectorAll('li').forEach(function (li) { if (ids.indexOf(li.getAttribute('data-id')) < 0) li.remove(); });
+    var order = Array.prototype.map.call(ul.querySelectorAll('li'), function (li) { return li.getAttribute('data-id'); }).join(',');
+    if (mode !== 'live' && order !== ids.join(',')) {
+      var tops = {};
+      ul.querySelectorAll('li').forEach(function (li) { tops[li.getAttribute('data-id')] = li.getBoundingClientRect().top; });
+      ids.forEach(function (id) { ul.appendChild(ul.querySelector('li[data-id="' + id + '"]')); });
+      if (!reduceMotion()) ul.querySelectorAll('li').forEach(function (li) {
+        var d = tops[li.getAttribute('data-id')] - li.getBoundingClientRect().top;
+        if (!isFinite(d) || Math.abs(d) < 1) return;
+        li.style.transition = 'none'; li.style.transform = 'translateY(' + d + 'px)';
+        void li.offsetWidth;
+        li.style.transition = 'transform 0.55s var(--ease)'; li.style.transform = '';
+      });
+    }
+    var hn = root.querySelector('[data-live="hatchNote"]'); if (hn) hn.hidden = !anyIdle;
+    setText(root, 'horizon', Rx.H + ' ' + F.monthsWord(Rx.H));
+  }
+
+  function updateHome(Rx, mode, dragging) {
+    var root = document.getElementById('view-home');
+    if (!root || !root.querySelector('.answer')) return;
+    updateAnswer(root, Rx, mode);
+    updateMonth(root, Rx, mode, dragging);
+    updateLadder(root, Rx, mode);
+    if (mode !== 'live') {
+      var w = root.querySelector('[data-slot="warn"]'), ins = root.querySelector('[data-slot="insight"]'), res = root.querySelector('[data-slot="reserve"]');
+      var wh = warningsHtml(), ih = insightHtml(), rh = reserveMiniHtml();
+      if (w && w.innerHTML !== wh) w.innerHTML = wh;
+      if (ins && ins.getAttribute('data-h') !== ih) { ins.setAttribute('data-h', ih); ins.innerHTML = ih; }
+      if (res && res.getAttribute('data-h') !== rh) { res.setAttribute('data-h', rh); res.innerHTML = rh; }
+    }
+  }
+
+  /* ── ползунки: пересчёт прямо под пальцем ── */
+  function bindSlider(sl, kind) {
+    var dragging = false, pending = null, raf = 0;
+    function valueAt(x) {
+      var r = sl.getBoundingClientRect();
+      var f = Math.max(0, Math.min(1, (x - r.left - 15) / Math.max(1, r.width - 30)));
+      if (kind === 'duty') return Math.max(0, Math.min(+sl.getAttribute('data-maxn'), Math.round(f * +sl.getAttribute('data-days'))));
+      var mn = +sl.getAttribute('data-min'), mx = +sl.getAttribute('data-max');
+      return Math.max(mn, Math.min(mx, Math.round((mn + f * (mx - mn)) / PRICE_STEP) * PRICE_STEP));
+    }
+    function frac(v) {
+      if (kind === 'duty') return v / +sl.getAttribute('data-days');
+      var mn = +sl.getAttribute('data-min'), mx = +sl.getAttribute('data-max');
+      return (v - mn) / (mx - mn);
+    }
+    function apply(s, v) {
+      if (kind === 'duty') s.schedule.dutyDays = +sl.getAttribute('data-maxn') - v;
+      else s.options.daily.price = v;
+    }
+    function run() {
+      raf = 0;
+      if (pending === null) return;
+      var s = F.clone(state); apply(s, pending);
+      updateHome(F.compute(s, { light: true }), 'live', kind);
+    }
+    function settle(v) {
+      sl.classList.remove('drag');
+      apply(state, v);
+      commit();
+    }
+    sl.addEventListener('pointerdown', function (e) {
+      if (e.button > 0) return;
+      dragging = true; sl.classList.add('drag');
+      try { sl.setPointerCapture(e.pointerId); } catch (x) {}
+      pending = valueAt(e.clientX); paintSlider(sl, frac(pending));
+      if (!raf) raf = requestAnimationFrame(run);
+    });
+    sl.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      var v = valueAt(e.clientX);
+      if (v === pending) return;
+      pending = v; paintSlider(sl, frac(v));
+      if (!raf) raf = requestAnimationFrame(run);
+    });
+    sl.addEventListener('pointerup', function () { if (!dragging) return; dragging = false; if (raf) { cancelAnimationFrame(raf); raf = 0; } settle(pending); });
+    sl.addEventListener('pointercancel', function () { dragging = false; sl.classList.remove('drag'); if (raf) { cancelAnimationFrame(raf); raf = 0; } updateHome(R, 'settle'); });
+    sl.addEventListener('keydown', function (e) {
+      var cur = kind === 'duty' ? R.monthsH[0].nights : R.state.options.daily.price;
+      var step = kind === 'duty' ? 1 : PRICE_STEP, d = 0;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') d = step;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') d = -step;
+      if (!d) return;
+      e.preventDefault();
+      var v = kind === 'duty' ? Math.max(0, Math.min(+sl.getAttribute('data-maxn'), cur + d)) : Math.max(0, Math.round((cur + d) / step) * step);
+      settle(v);
+    });
   }
 
   var Home = {
     html: function () {
-      if (!R.best) return brandHead() + emptyEnabled() + quickHtml();
-      return brandHead() + heroHtml() + warningsHtml() + metricsHtml() + quickHtml() + priorityHtml() + adviceHtml() + flowHtml() + reserveHtml() +
-        '<p class="group-note" style="margin-top:22px;text-align:center">Все суммы — ваши вводные. BASE не получает цены с Booking или OLX автоматически и ничего не отправляет на сервер.</p>';
+      if (!R.best) return brandHead() + emptyEnabled();
+      return '<div class="' + (homeShown ? '' : 'stagger') + '">' + brandHead() + answerShell() + '<div data-slot="warn"></div>' + monthShell() + ladderShell() +
+        '<div data-slot="insight"></div><div data-slot="reserve"></div></div>';
     },
     after: function (el) {
-      var fc = el.querySelector('[data-chart="flow"]');
-      if (fc && R.best) {
-        var id = flowId(), r = R.options[id];
-        Ch.flow(fc, {
-          labels: R.monthsH.map(function (m) { return m.label; }),
-          values: r.rows.slice(0, R.H).map(function (x) { return x.cashOut; }),
-          refunds: r.rows.slice(0, R.H).map(function (x) { return x.cashIn; }),
-          selected: ui.flowMonth, color: optColor(id),
-          onSelect: function (i) { ui.flowMonth = i; render(); var c = document.querySelector('[data-chart="flow"]'); if (c) c.focus({ preventScroll: true }); }
-        });
-      }
-    }
+      el.setAttribute('data-shape', homeShape(R));
+      if (!R.best) return;
+      el.querySelectorAll('[data-slider]').forEach(function (sl) { bindSlider(sl, sl.getAttribute('data-slider')); });
+      updateHome(R, 'mount');
+      homeShown = true;
+    },
+    canUpdate: function (el) { return !!el.querySelector('.answer') && el.getAttribute('data-shape') === homeShape(R); },
+    update: function () { updateHome(R, 'settle'); }
   };
+
+  /* ── картинка решения: чтобы показать второму человеку ── */
+  function shareDecision() {
+    if (!R.best) return;
+    var W = 1080, H = 1350, cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    var x = cv.getContext('2d');
+    var FONT = 'system-ui, -apple-system, "SF Pro Display", "Segoe UI", Roboto, Arial, sans-serif';
+    function font(w, s) { x.font = w + ' ' + s + 'px ' + FONT; }
+    function rr(px, py, w, hh, r) { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + hh, r); x.arcTo(px + w, py + hh, px, py + hh, r); x.arcTo(px, py + hh, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); }
+    var g = x.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#1d1e23'); g.addColorStop(1, '#0b0c0e');
+    x.fillStyle = g; x.fillRect(0, 0, W, H);
+    var m = answerModel(R);
+    var glow = x.createRadialGradient(140, 120, 0, 140, 120, 980);
+    glow.addColorStop(0, m.tone === 'warn' ? 'rgba(255,179,64,0.20)' : 'rgba(52,199,89,0.22)'); glow.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = glow; x.fillRect(0, 0, W, H);
+    // знак и название
+    rr(80, 80, 88, 88, 24); x.fillStyle = '#f4f4f6'; x.fill();
+    x.save(); x.translate(80, 80); x.scale(88 / 24, 88 / 24); x.strokeStyle = '#0b0b0d'; x.lineWidth = 2.2; x.lineCap = 'round'; x.lineJoin = 'round';
+    x.beginPath(); x.moveTo(6, 11.8); x.lineTo(12, 6.5); x.lineTo(18, 11.8); x.moveTo(8, 10.3); x.lineTo(8, 17.2); x.moveTo(16, 10.3); x.lineTo(16, 17.2); x.moveTo(5, 17.2); x.lineTo(19, 17.2); x.stroke(); x.restore();
+    x.fillStyle = '#f4f4f6'; font('800', 56); x.fillText('BASE', 194, 136);
+    x.fillStyle = '#8a8a92'; font('500', 28); x.fillText('Живи свободно. Плати разумно.', 196, 168);
+    // ответ
+    var y = 300;
+    x.fillStyle = '#8a8a92'; font('700', 28); x.fillText('НАШ ВЫБОР', 80, y);
+    x.fillStyle = '#f4f4f6'; font('700', 68);
+    var words = m.title.split(' '), line = '', lines = [];
+    words.forEach(function (w) { var t = line ? line + ' ' + w : w; if (x.measureText(t).width > W - 160 && line) { lines.push(line); line = w; } else line = t; });
+    lines.push(line);
+    lines.forEach(function (l) { y += 82; x.fillText(l, 80, y); });
+    y += 92; x.fillStyle = '#b0b0b8'; font('500', 38); x.fillText(m.label, 80, y);
+    var big = money(m.val), bs = 210;
+    font('800', bs); while (x.measureText(big).width > W - 160 && bs > 90) { bs -= 6; font('800', bs); }
+    y += bs * 0.86 + 14; x.fillStyle = m.tone === 'warn' ? '#ffb340' : m.tone === 'pos' ? '#34c759' : '#f4f4f6'; x.fillText(big, 74, y);
+    y += 66; x.fillStyle = '#f4f4f6'; font('600', 40); x.fillText(m.sub, 80, y);
+    if (m.equiv) { y += 52; x.fillStyle = '#b0b0b8'; font('500', 34); x.fillText(m.equiv.charAt(0).toUpperCase() + m.equiv.slice(1), 80, y); }
+    if (m.vs) { y += 48; x.fillStyle = '#8a8a92'; font('500', 32); x.fillText(m.vs.charAt(0).toUpperCase() + m.vs.slice(1), 80, y); }
+    // лестница цен
+    y += 70;
+    x.fillStyle = 'rgba(255,255,255,0.08)'; x.fillRect(80, y - 30, W - 160, 2);
+    var ids = R.byCost.slice(0, 4), maxA = Math.max.apply(null, ids.map(function (id) { return R.options[id].avg; }));
+    var hatch = document.createElement('canvas'); hatch.width = hatch.height = 14;
+    var hx = hatch.getContext('2d'); hx.strokeStyle = '#ffb340'; hx.lineWidth = 4; hx.beginPath(); hx.moveTo(-2, 16); hx.lineTo(16, -2); hx.stroke();
+    var hpat = x.createPattern(hatch, 'repeat');
+    var rowH = Math.min(96, Math.floor((H - 230 - y) / ids.length));
+    ids.forEach(function (id) {
+      var r = R.options[id], idle = Math.min(r.avg, r.idleTotal / R.H);
+      y += rowH;
+      x.fillStyle = '#f4f4f6'; font('600', 34); x.fillText(oname(id) + (id === R.bestId ? '  ✓' : ''), 80, y - 26);
+      font('700', 34); var vt = money(r.avg) + ' / мес'; x.fillText(vt, W - 80 - x.measureText(vt).width, y - 26);
+      var bw = W - 160, wUse = (r.avg - idle) / maxA * bw, wIdle = idle / maxA * bw;
+      rr(80, y - 10, bw, 14, 7); x.fillStyle = 'rgba(255,255,255,0.08)'; x.fill();
+      x.save(); rr(80, y - 10, Math.max(14, wUse + wIdle), 14, 7); x.clip();
+      x.fillStyle = HEX_DARK[id] || '#8a8a92'; x.fillRect(80, y - 10, wUse, 14);
+      if (wIdle > 1) { x.fillStyle = hpat; x.fillRect(80 + wUse, y - 10, wIdle, 14); }
+      x.restore();
+    });
+    // легенда штриховки
+    var anyIdle = ids.some(function (id) { return R.options[id].idleTotal > 0.5; });
+    if (anyIdle) {
+      y += 52;
+      x.save(); rr(80, y - 16, 36, 14, 4); x.clip(); x.fillStyle = hpat; x.fillRect(80, y - 16, 36, 14); x.restore();
+      x.fillStyle = '#8a8a92'; font('500', 26); x.fillText('— плата за дни, когда нас нет дома', 128, y - 3);
+    }
+    // подвал
+    var S = R.state.schedule, m0 = R.monthsH[0];
+    x.fillStyle = '#b0b0b8'; font('500', 30);
+    x.fillText(m0.duty + ' ' + F.daysWord(m0.duty) + ' в Краматорске · ' + m0.nights + ' ' + F.nightsWord(m0.nights) + ' ' + homeIn() +
+      (R.state.options.daily.enabled ? ' · ночь ' + money(R.state.options.daily.price) : ''), 80, H - 118);
+    x.fillStyle = '#6e6e76'; font('500', 24);
+    x.fillText('Посчитано в BASE · суммы — наши вводные, а не предложения рынка', 80, H - 74);
+    // отдать системе «Поделиться» (синхронно — так требует Safari)
+    var data = cv.toDataURL('image/png');
+    var bin = atob(data.split(',')[1]), bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    var blob = new Blob([bytes], { type: 'image/png' });
+    var name = 'base-reshenie.png', file = null;
+    try { file = new File([blob], name, { type: 'image/png' }); } catch (e) {}
+    var text = m.title + '. ' + m.label + ' ' + money(m.val) + ' ' + m.sub + '.';
+    if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({ files: [file], title: 'BASE — наше решение', text: text }).catch(function () {});
+      return;
+    }
+    var url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+    toast('Картинка решения сохранена');
+  }
 
   /* ═════════════════════════ СРАВНЕНИЕ ═════════════════════════ */
   function compareHead() {
@@ -861,6 +1288,14 @@
   }
   function refreshSheet() {
     if (!sheet) return;
+    if (sheet.dynamic) {
+      // лист без полей ввода — просто перерисовываем, сохраняя прокрутку и фокус
+      var active = document.activeElement, fk = active && $body.contains(active) ? fkOf(active) : null, st = $body.scrollTop;
+      $body.innerHTML = sheet.render();
+      if (sheet.after) sheet.after($body);
+      $body.scrollTop = st;
+      if (fk) { var f = $body.querySelector(fk); if (f) try { f.focus({ preventScroll: true }); } catch (e) {} }
+    }
     if (sheet.refresh) sheet.refresh($body);
     syncControls($body);
   }
@@ -1036,6 +1471,153 @@
             '<button type="button" data-act="ovr" data-i="' + m.i + '" data-delta="1" aria-label="' + h(m.labelLong) + ': больше дней">' + I.plus + '</button></span></span></div>';
         }).join('') + (hasOv ? '<div class="control-row"><button type="button" class="btn btn-sm btn-block" data-act="ovrClear">Одинаково во всех месяцах</button></div>' : '');
         if (fk) { var f = box.querySelector(fk); if (f) f.focus({ preventScroll: true }); }
+      }
+    };
+  }
+
+  /* ── лист: вариант (просмотр) ── */
+  function li(label, value, sub) {
+    return '<div class="li"><span class="li-label">' + h(label) + (sub ? '<small>' + h(sub) + '</small>' : '') + '</span><span class="li-value num">' + value + '</span></div>';
+  }
+  function liBtn(label, value, attrs) {
+    return '<button type="button" class="li li-btn" ' + attrs + '><span class="li-label">' + h(label) + '</span><span class="li-value num">' + value + NEXT + '</span></button>';
+  }
+  function optionViewSheet(id) {
+    ui.flowMonth = 0;
+    return {
+      title: R.state.options[id].name,
+      dynamic: true,
+      render: function () {
+        var r = R.options[id];
+        if (ui.flowMonth >= R.H) ui.flowMonth = 0;
+        var m = ui.flowMonth, row = r.rows[m], ml = R.months[m];
+        var ico = { pay: I.out, prepay: I.clock, freeze: I.lock, refund: I.back, info: I.check };
+        var events = row.events.length ? row.events.map(function (e) {
+          var amt = e.kind === 'refund' ? '+' + money(e.amount) : e.kind === 'info' ? '—' : money(e.amount);
+          return '<li class="' + e.kind + '"><span class="flow-ico" aria-hidden="true">' + (ico[e.kind] || I.out) + '</span><span>' + h(e.label) + '</span><span class="amt">' + amt + '</span>' +
+            (e.note || e.kind === 'freeze' ? '<span class="note">' + h(e.note || 'временно заморожено') + '</span>' : '') + '</li>';
+        }).join('') : '<li class="info"><span class="flow-ico">' + I.check + '</span><span>Платежей нет — весь месяц вне дома</span><span class="amt">0&nbsp;₴</span></li>';
+        var moveSub = r.moveInParts.map(function (p) { return p.label.toLowerCase(); }).join(' + ');
+        return '<div class="ov-head"><i class="dot lg" style="--c:' + optColor(id) + '"></i><span class="muted">' + typeLabel(r.type) + (id === R.bestId ? ' · лучший выбор' : '') + '</span></div>' +
+          '<div class="ov-big num">' + money(r.avg) + '</div><div class="ov-sub">в месяц, в среднем за ' + R.H + ' ' + F.monthsWord(R.H) + '</div>' +
+          '<div class="list">' + li('Первый месяц', money(r.first), r.commission ? 'с комиссией' : '') + li('За 12 месяцев', money(r.year)) +
+          li('Нужно при заселении', money(r.moveIn), moveSub) +
+          li('Вернётся при выезде', money(r.refundable), r.refundable ? 'залог — не расход' : '') +
+          (r.sunk ? li('Не вернётся никогда', money(r.sunk), 'комиссия и сборы') : '') +
+          li('Оплачено, но пустует', num(r.unusedPerMonth, 1) + ' ' + F.daysWord(r.unusedPerMonth) + '/мес', r.idleTotal ? money(r.idleTotal) + ' за ' + R.H + ' мес.' : 'платите только за свои ночи') + '</div>' +
+          '<h3 class="group-title">Платежи по месяцам</h3><div class="list list-pad"><div data-chart="flow"></div>' +
+          '<div class="flow-detail"><div class="row-between"><b>' + h(ml.labelLong) + '</b><span class="muted small">' + ml.nights + ' ' + F.nightsWord(ml.nights) + ' дома</span></div>' +
+          '<ul class="flow-list">' + events + '</ul></div>' +
+          '<div class="flow-sum">' + kpi('Заплатите', money(r.cashOutTotal)) + kpi('Вернётся', money(r.cashInTotal)) + kpi('Расход', money(r.total)) + '</div></div>' +
+          '<h3 class="group-title">Оценка</h3><div class="list">' +
+          liBtn('Финансовая гибкость', num(r.flex.score) + ' из 100', 'data-act="flex" data-id="' + id + '"') +
+          liBtn('Комфорт и безопасность', num(r.comfort.score) + ' из 100', 'data-act="editOption" data-id="' + id + '" data-section="comfort"') + '</div>' +
+          '<button type="button" class="btn btn-primary btn-block" style="margin-top:18px" data-act="editOption" data-id="' + id + '">' + I.edit + 'Изменить условия</button>';
+      },
+      after: function (body) {
+        var fc = body.querySelector('[data-chart="flow"]');
+        var r = R.options[id];
+        if (fc) Ch.flow(fc, {
+          labels: R.monthsH.map(function (m) { return m.label; }),
+          values: r.rows.slice(0, R.H).map(function (x) { return x.cashOut; }),
+          refunds: r.rows.slice(0, R.H).map(function (x) { return x.cashIn; }),
+          selected: ui.flowMonth, color: optColor(id),
+          onSelect: function (i) { ui.flowMonth = i; rebuildSheet(); var c = $body.querySelector('[data-chart="flow"]'); if (c) c.focus({ preventScroll: true }); }
+        });
+      }
+    };
+  }
+
+  /* ── лист: все советы ── */
+  function adviceSheet() {
+    return {
+      title: 'Советник',
+      dynamic: true,
+      render: function () {
+        return '<p class="card-sub" style="margin:2px 2px 12px">Каждый совет посчитан по вашим цифрам — откройте «Как посчитано».</p>' +
+          '<div class="list list-pad"><ul class="advice">' + (R.advice || []).map(adviceItem).join('') + '</ul></div>';
+      }
+    };
+  }
+
+  /* ── лист: калькулятор свободы ── */
+  function reserveSheet() {
+    return {
+      title: 'Калькулятор свободы',
+      dynamic: true,
+      render: function () {
+        var rs = R.reserve;
+        if (!rs || (rs.monthly <= 0.5 && rs.points[3].saved <= 0.5)) {
+          return '<p class="card-sub">Относительно варианта «' + h(R.baseline.short) + '» экономии нет. Выберите другую базу сравнения на главном экране.</p>';
+        }
+        var idx = [1, 3, 6, 12].indexOf(ui.reserveK); if (idx < 0) idx = 3;
+        var p = rs.points[idx];
+        var prog = rs.goal > 0 ? Math.max(0, Math.min(1, p.saved / rs.goal)) : 0;
+        var C = 2 * Math.PI * 46;
+        return '<div class="seg" role="group">' + [1, 3, 6, 12].map(function (k) {
+          return '<button type="button" data-act="reserveK" data-k="' + k + '" aria-pressed="' + (k === ui.reserveK) + '">' + k + ' мес.</button>';
+        }).join('') + '</div>' +
+          '<div class="reserve-top"><div><div class="muted small">Останется у вас за ' + p.months + ' ' + F.monthsWord(p.months) + '</div>' +
+          '<div class="reserve-big good num">' + money(p.saved) + '</div><div class="muted small" style="margin-top:6px">по сравнению с ' + h(vsText(R.baseline.id)) + '</div></div>' +
+          '<div class="ring" role="img" aria-label="Цель резерва: ' + Math.round(prog * 100) + '%"><svg viewBox="0 0 104 104"><circle class="ring-track" cx="52" cy="52" r="46"/><circle class="ring-fill" cx="52" cy="52" r="46" stroke-dasharray="' + C + '" stroke-dashoffset="' + (C * (1 - prog)) + '"/></svg>' +
+          '<div class="ring-center"><div><b>' + Math.round(prog * 100) + '%</b>цели</div></div></div></div>' +
+          '<div class="list" style="margin-top:16px">' + li('Доля расходов на жильё', num(p.pct, 1) + '%') + li('Это месяцев проживания', num(p.monthsOfLiving, 1)) +
+          li('Если держать на вкладе', money(p.withYield), 'ставка ' + num(rs.rate, 1) + '% — ваша оценка, не обещание') +
+          li('Цель резерва', money(rs.goal), rs.goalMonths + ' ' + F.monthsWord(rs.goalMonths) + ' жилья · ' + (rs.reachMonth ? 'наберёте за ' + rs.reachMonth + ' ' + F.monthsWord(rs.reachMonth) : 'за 5 лет не набирается')) + '</div>' +
+          '<h3 class="group-title">Как превратить экономию в резерв</h3><div class="list list-pad"><ol class="steps">' +
+          '<li>В день оплаты жилья переводите <b>' + money(Math.max(0, rs.monthly)) + '</b> на отдельный накопительный счёт.</li>' +
+          '<li>Не трогайте, пока не наберёте ' + money(rs.goal) + '.</li>' +
+          '<li>Сверх цели — решайте сами: вклад, досрочные платежи или покупка без долгов.</li></ol></div>' +
+          '<h3 class="group-title">Параметры</h3><div class="group">' +
+          frow('Ставка вклада', stepper('finance.rate', 0.5, 0, 100, 'pct', 'Ставка вклада'), 'годовых') +
+          frow('Цель резерва', stepper('finance.reserveGoalMonths', 1, 0, 36, 'months', 'Цель резерва'), 'месяцев жилья') + '</div>';
+      }
+    };
+  }
+
+  /* ── лист: что важнее ── */
+  function prioritySheet() {
+    return {
+      title: 'Что для вас важнее',
+      dynamic: true,
+      render: function () {
+        return '<p class="card-sub" style="margin:2px 2px 12px">От приоритета зависит, какой вариант BASE назовёт лучшим. Стоимость считается одинаково.</p>' +
+          '<div class="list">' + F.PRIORITY_IDS.map(function (p) {
+            var s = F.clone(state); s.priority = p;
+            var r = F.compute(s, { light: true });
+            var on = R.state.priority === p;
+            return '<button type="button" class="li li-btn choice' + (on ? ' on' : '') + '" data-act="pick" data-path="priority" data-value="' + p + '" aria-pressed="' + on + '">' +
+              '<span class="li-label">' + h(F.PRIORITIES[p].label) + '<small>' + h(PRIORITY_NOTE[p]) + '</small></span>' +
+              '<span class="li-value">' + (r.best ? '<i class="dot" style="--c:' + optColor(r.best.id) + '"></i>' + h(r.best.short) : '—') + (on ? I.check : '') + '</span></button>';
+          }).join('') + '</div>' +
+          '<button type="button" class="link-btn" style="margin-top:12px" data-act="scoring">Как считается оценка</button>';
+      }
+    };
+  }
+
+  /* ── лист: с чем сравнивать ── */
+  function baselineSheet() {
+    return {
+      title: 'С чем сравнивать',
+      dynamic: true,
+      render: function () {
+        var ids = OPT.slice().sort(function (a, b) { return R.options[b].avg - R.options[a].avg; });
+        var m = R.best ? answerModel(R) : null, b = R.best, base = R.baseline;
+        var calc = '';
+        if (m && b && base) {
+          var vsR = R.savings.same && R.savings.nextId ? R.options[R.savings.nextId] : base;
+          calc = '<div class="calc-hero"><div class="row-between"><span><i class="dot" style="--c:' + optColor(vsR.id) + '"></i> ' + h(vsR.short) + '</span><b class="num">' + money(vsR.avg) + '</b></div>' +
+            '<div class="row-between"><span><i class="dot" style="--c:' + optColor(b.id) + '"></i> ' + h(b.short) + '</span><b class="num">− ' + money(b.avg) + '</b></div>' +
+            '<div class="row-between total"><span>' + h(m.label) + '</span><b class="num">' + money(m.val) + '</b></div>' +
+            '<p>Средний месяц за ' + R.H + ' ' + F.monthsWord(R.H) + ', с комиссиями и сборами. Возвратный залог не расход.</p></div>';
+        }
+        return calc + '<p class="card-sub" style="margin:2px 2px 12px">Экономия на главном экране считается относительно выбранного варианта.</p>' +
+          '<div class="list">' + ids.map(function (id) {
+            var on = R.state.baselineId === id, r = R.options[id];
+            return '<button type="button" class="li li-btn choice' + (on ? ' on' : '') + '" data-act="pick" data-path="baselineId" data-value="' + id + '" aria-pressed="' + on + '">' +
+              '<span class="li-label"><span class="row"><i class="dot" style="--c:' + optColor(id) + '"></i>' + h(r.name) + '</span><small>' + (R.state.options[id].enabled ? typeLabel(r.type) : 'выключен в сравнении') + '</small></span>' +
+              '<span class="li-value num">' + money(r.avg) + (on ? I.check : '') + '</span></button>';
+          }).join('') + '</div>';
       }
     };
   }
@@ -1217,9 +1799,18 @@
     installHelp: function () { openSheet(installSheet()); },
     importOpen: function () { openSheet(importSheet()); },
     cmpTab: function (el) { ui.compareTab = el.getAttribute('data-id'); if (ui.tab !== 'compare') { location.replace('#compare'); } else render(); },
-    adviceAll: function () { ui.adviceAll = !ui.adviceAll; render(); },
-    flowOpt: function (el) { ui.flowId = el.getAttribute('data-id'); render(); },
-    reserveK: function (el) { ui.reserveK = +el.getAttribute('data-k'); render(); },
+    share: function () { shareDecision(); },
+    viewOption: function (el) { openSheet(optionViewSheet(el.getAttribute('data-id'))); },
+    advice: function () { openSheet(adviceSheet()); },
+    reserve: function () { openSheet(reserveSheet()); },
+    priority: function () { openSheet(prioritySheet()); },
+    baseline: function () { openSheet(baselineSheet()); },
+    pick: function (el) {
+      setPath(state, el.getAttribute('data-path'), el.getAttribute('data-value'));
+      commit();
+      setTimeout(closeSheet, reduceMotion() ? 0 : 160);
+    },
+    reserveK: function (el) { ui.reserveK = +el.getAttribute('data-k'); if (sheet) refreshSheet(); else render(); },
     scFor: function (el) { ui.scFor = el.getAttribute('data-id'); render(); },
     scOpen: function (el) { openScenario(el.getAttribute('data-id')); },
     scApply: function (el) {
@@ -1371,7 +1962,7 @@
 
   /* ═════════════════════════ СОБЫТИЯ ═════════════════════════ */
   function parseInput(str) {
-    var s = String(str).replace(/[\s  ]/g, '').replace(',', '.');
+    var s = String(str).replace(/[\s\u00a0\u202f]/g, '').replace(',', '.');
     if (s === '') return '';
     var n = Number(s);
     return isFinite(n) ? n : str;
@@ -1481,7 +2072,7 @@
     if (Math.abs(w - lastW) < 2) return;
     lastW = w;
     clearTimeout(rsT);
-    rsT = setTimeout(render, 120);
+    rsT = setTimeout(function () { var hv = document.getElementById('view-home'); if (hv) hv.removeAttribute('data-shape'); render(); }, 120);
   }
   if (window.ResizeObserver) new ResizeObserver(onResize).observe(document.getElementById('main'));
   else window.addEventListener('resize', onResize);

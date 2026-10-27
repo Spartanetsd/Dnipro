@@ -131,10 +131,10 @@
     if (v === 0) v = 0; // убираем −0
     var neg = v < 0, a = Math.abs(v);
     var parts = (digits ? String(a) : String(Math.round(a))).split('.');
-    var int = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+    var int = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
     return (neg ? '−' : '') + int + (parts[1] ? ',' + parts[1] : '');
   }
-  function fmtMoney(n) { return fmtNum(n) + ' ₴'; }
+  function fmtMoney(n) { return fmtNum(n) + '\u00a0₴'; }
   function fmtSigned(n) { var v = Math.round(n); return (v > 0 ? '+' : v < 0 ? '−' : '') + fmtMoney(Math.abs(v)); }
   function plural(n, one, few, many) {
     var a = Math.abs(Math.round(n)) % 100, b = a % 10;
@@ -229,7 +229,7 @@
       warnings.push({ path: path, code: 'empty', message: label + ': пустое поле — считается как ' + fmtNum(z) });
       return z;
     }
-    var n = typeof v === 'number' ? v : parseFloat(String(v).replace(/\s| | /g, '').replace(',', '.'));
+    var n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[\s\u00a0\u202f]/g, '').replace(',', '.'));
     if (!isFinite(n)) {
       warnings.push({ path: path, code: 'nan', message: label + ': не число — использовано ' + fmtNum(def) });
       return def;
@@ -753,7 +753,8 @@
     var n = normalize(raw, opts.now);
     var state = n.state, warnings = n.warnings;
     var H = state.schedule.horizon;
-    var M = Math.max(H, MAX_SERIES);
+    // облегчённый расчёт (сценарии, зоны решения на ползунках) не ищет точки перелома на 5 лет — хватает года
+    var M = opts.light ? Math.max(H, 12) : Math.max(H, MAX_SERIES);
     var months = buildMonths(state.schedule, M);
     var mH = months.slice(0, H);
     mH.forEach(function (m) {
